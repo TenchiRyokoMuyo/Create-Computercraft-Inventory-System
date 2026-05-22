@@ -1,61 +1,40 @@
-Frogport Central Command v1.1
-=============================
+Frogport Central Command v1.4
+================================
 
-ComputerCraft logistics controller for Create packagers, item vaults, producers, consumers, and overseer displays.
+Install the contents of this zip at the root of each ComputerCraft computer.
+Then run:
 
-Install
--------
-Upload startup.lua to the root of a ComputerCraft computer and reboot/run:
+  startup
 
-startup
+startup.lua is a shell-style launcher. It can:
+- Run the configured role
+- Change role
+- Install missing files from GitHub
+- Force-update files from GitHub
+- Reset the local role config
+- List peripherals
+- Open CraftOS shell
 
-The startup file now checks for missing Frogport files and downloads them from:
-https://github.com/TenchiRyokoMuyo/Create-Computercraft-Inventory-System
+Roles:
+- Vault Keeper: watches one vault inventory and one item, requests Producers when stock falls below Full, and pulses its packager for matching Consumer requests.
+- Producer: listens for matching Producer requests and pulses one packager. It may report inventory but never requests items.
+- Consumer: watches multiple inventories independently and requests matching Vault Keepers for each watched inventory/item.
+- Overseer: dashboard plus remote config editor by node name.
 
-If files already exist, startup leaves them alone.
-To force refresh the Frogport files from GitHub, run:
+Inventory states:
+- Full: 95%-100%, no request
+- Stock Needed: 75%-94%, request every 5 seconds
+- Low: 50%-74%, request every 3 seconds
+- Critically Low: 10%-49%, request every 1 second
+- Empty: 0%-9%, emergency constant mode until back to Stock Needed or higher
 
-startup update
+v1.4 capacity calculation:
+- Uses getItemLimit(slot) when available instead of assuming size() * 64.
+- Adds capacity modes:
+  1. slot_limits: sum getItemLimit(slot) for every slot.
+  2. matching_slots: only slots currently holding the configured item.
+  3. occupied_slots: all currently occupied slots.
+  4. filled_plus_one: matching item slots plus one extra stack.
+- Manual capacity override still exists and wins if set above 0.
 
-Requirements
-------------
-ComputerCraft HTTP must be enabled if using the automatic installer.
-If HTTP is disabled, upload the full zip contents manually.
-
-Files
------
-/startup.lua
-/Frogport/FrogportLib.lua
-/Frogport/FrogportVaultKeeper.lua
-/Frogport/FrogportProducer.lua
-/Frogport/FrogportConsumer.lua
-/Frogport/FrogportOverseer.lua
-/README.txt
-
-Roles
------
-Vault Keeper:
-- Watches one configured item in one vault inventory.
-- Requests matching producers based on inventory state.
-- Pulses one local packager when a matching consumer requests restock.
-
-Producer:
-- Produces one configured item.
-- Pulses one local packager when a matching Vault Keeper requests production.
-- Reports inventory if an inventory is attached.
-- Never requests items.
-
-Consumer:
-- Watches one configured item in one attached inventory.
-- Requests matching Vault Keepers based on inventory state.
-
-Overseer:
-- Displays Vault Keepers, Producers, Consumers, statuses, percentages, and recent requests.
-
-Shared Inventory States
------------------------
-Full             95%-100%   no requests
-Stock Needed     75%-94%    request every 5 seconds
-Low              50%-74%    request every 3 seconds
-Critically Low   10%-49%    request every 1 second
-Empty             0%-9%     emergency constant requests until back to 75%+
+For Create item vaults, start with slot_limits. If the modded inventory peripheral still reports strange virtual capacity, use the Overseer or local setup to change capacity mode or set a manual full capacity.

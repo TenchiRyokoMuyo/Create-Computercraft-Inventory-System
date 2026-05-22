@@ -1,114 +1,124 @@
 -- FrogportConsumer.lua
--- Watches one inventory and requests matching Vault Keepers to restock.
+-- Watches multiple inventories independently. Each entry auto-detects/uses one item and requests matching Vault Keepers.
 
 local Lib = dofile("/Frogport/FrogportLib.lua")
 Lib.ensureDirs()
+local cfgPath = Lib.DATA .. "/consumer.cfg"
+local cfg = Lib.loadTable(cfgPath, nil)
 
-local cfg, cfgPath = Lib.setupCommon("consumer", "CON", true)
-Lib.saveTable(cfgPath, cfg)
-
-local found = Lib.detectPeripherals()
-cfg.modems = (#found.modems > 0) and found.modems or cfg.modems
-if not cfg.inventory and found.inventories[1] then cfg.inventory = found.inventories[1] end
-Lib.openModems(cfg.modems, Lib.CHANNEL)
-
-local emptyLatched = false
-local lastRequest = 0
-local lastHeartbeat = 0
-local recent = {}
-
-local function log(line)
-  table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line)
-  while #recent > 6 do table.remove(recent) end
+local function addWatchedFromInventory(c, invName)
+  local item = Lib.firstDetectedItem(invName)
+  print("")
+  print("Configure inventory: " .. tostring(invName))
+  if item then print("Auto-detected first item: " .. item) end
+  if Lib.askYesNo("Use/track this inventory", item ~= nil) then
+    item = Lib.pickDetectedItem(invName, item or "minecraft:coal")
+    local stackSize = c.defaultStackSize or Lib.DEFAULTS.defaultStackSize
+    local capOverride, capMode = Lib.askCapacitySettings(invName, item, stackSize, 0, "slot_limits")
+    table.insert(c.watched, {
+      label = Lib.askString("Label", invName),
+      inventory = invName,
+      item = item,
+      defaultStackSize = stackSize,
+      capacityOverride = capOverride,
+      capacityMode = capMode,
+      enabled = true
+    })
+  end
 end
 
-local function scan()
-  local inv = Lib.countItem(cfg.inventory, cfg.item, cfg.defaultStackSize)
-  if inv.percent <= (tonumber(cfg.criticalMin) or Lib.DEFAULTS.criticalMin) - 0.001 then
-    emptyLatched = true
+local function setup()
+  local found = Lib.detectPeripherals()
+  Lib.header("Consumer setup")
+  Lib.printDetection(found); print("")
+  local c = Lib.basicConfig("consumer", "CON")
+  c.name = Lib.askString("Node name", os.getComputerLabel() or c.name)
+  c.modems = found.modems; c.monitor = found.monitors[1]
+  c.defaultStackSize = Lib.askNumber("Default stack size", Lib.DEFAULTS.defaultStackSize, 1, 64)
+  c.watched = {}
+  for _, inv in ipairs(found.inventories) do addWatchedFromInventory(c, inv) end
+  if #c.watched == 0 then
+    print("No watched inventories configured. You can still add one manually.")
+    local inv = Lib.askString("Inventory peripheral name", found.inventories[1] or "")
+    if inv and inv ~= "" then
+      local item = Lib.askString("Item string", "minecraft:coal")
+      local capOverride, capMode = Lib.askCapacitySettings(inv, item, c.defaultStackSize, 0, "slot_limits")
+      table.insert(c.watched, { label = Lib.askString("Label", inv), inventory = inv, item = item, defaultStackSize = c.defaultStackSize, capacityOverride = capOverride, capacityMode = capMode, enabled = true })
+    end
   end
-  if inv.percent >= (tonumber(cfg.stockNeededMin) or Lib.DEFAULTS.stockNeededMin) then
-    emptyLatched = false
-  end
-  local state = Lib.inventoryState(inv.percent, cfg, emptyLatched)
-  inv.state = state.label
-  inv.stateKey = state.key
-  inv.interval = state.interval
-  inv.mode = state.mode
-  inv.shouldRequest = state.shouldRequest
+  Lib.rescanCommon(c); Lib.saveTable(cfgPath, c); return c
+end
+
+if not cfg then cfg = setup() else Lib.defaultThresholds(cfg); cfg.watched = cfg.watched or {}; Lib.rescanCommon(cfg); Lib.saveTable(cfgPath, cfg) end
+Lib.openModems(cfg.modems, Lib.CHANNEL)
+
+local lastHeartbeat = 0
+local lastStatus = nil
+local recent = {}
+local runtime = {}
+
+local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 9 do table.remove(recent) end end
+local function rt(i) runtime[i] = runtime[i] or { emptyLatched = false, lastRequest = 0 }; return runtime[i] end
+
+local function scanEntry(entry, index)
+  local r = rt(index)
+  local inv = Lib.countItem(entry.inventory, entry.item, entry.defaultStackSize or cfg.defaultStackSize, entry.capacityOverride, entry.capacityMode)
+  if inv.percent < (tonumber(cfg.criticalMin) or Lib.DEFAULTS.criticalMin) then r.emptyLatched = true end
+  if inv.percent >= (tonumber(cfg.stockNeededMin) or Lib.DEFAULTS.stockNeededMin) then r.emptyLatched = false end
+  local state = Lib.inventoryState(inv.percent, cfg, r.emptyLatched)
+  inv.state, inv.stateKey, inv.interval, inv.mode, inv.shouldRequest = state.label, state.key, state.interval, state.mode, state.shouldRequest
+  inv.emptyLatched = r.emptyLatched
+  inv.index = index; inv.label = entry.label; inv.inventory = entry.inventory; inv.item = entry.item; inv.enabled = entry.enabled ~= false; inv.capacityOverride = entry.capacityOverride; inv.capacityMode = entry.capacityMode
+  if not inv.enabled then inv.shouldRequest = false end
   return inv
 end
 
-local function render(status)
-  Lib.clear()
-  term.setTextColor(colors.cyan)
-  print("Frogport Consumer")
-  term.setTextColor(colors.white)
-  print(cfg.name)
-  print(string.rep("-", 28))
-  print("Needs: " .. tostring(cfg.item))
-  print("Inventory: " .. tostring(cfg.inventory))
-  print("")
-  if status then
-    print("Count: " .. status.count .. " / " .. status.capacity)
-    print(string.format("Percent: %.1f%%", status.percent))
-    print("State: " .. status.state)
-    print("Mode: " .. status.mode)
-    print("Empty latch: " .. tostring(emptyLatched))
-  end
-  print("")
-  print("Recent:")
-  for _, l in ipairs(recent) do print(l) end
+local function scanAll()
+  local statuses = {}
+  for i, entry in ipairs(cfg.watched or {}) do statuses[i] = scanEntry(entry, i) end
+  return statuses
 end
 
-local function sendStatus(status)
-  Lib.transmit(cfg.modems, {
-    type = "STATUS",
-    role = "consumer",
-    nodeId = cfg.nodeId,
-    name = cfg.name,
-    item = cfg.item,
-    inventory = cfg.inventory,
-    count = status.count,
-    capacity = status.capacity,
-    percent = status.percent,
-    state = status.state,
-    stateKey = status.stateKey,
-    mode = status.mode,
-    emptyLatched = emptyLatched
-  })
+local function render(statuses)
+  Lib.clear(); term.setTextColor(colors.cyan); print("Frogport Consumer"); term.setTextColor(colors.white)
+  print(cfg.name); print(string.rep("-", 32))
+  print("Watched inventories: " .. tostring(#(cfg.watched or {}))); print("")
+  for _, s in ipairs(statuses or {}) do
+    print(string.format("[%s] %s", s.state, s.label or s.inventory))
+    print(string.format("  %s %.1f%% %s/%s", tostring(s.item), s.percent, tostring(s.count), tostring(s.capacity))); if tonumber(s.capacityOverride or 0) > 0 then print("  Capacity: manual") else print("  Capacity: auto " .. tostring(s.capacityMode or "slot_limits")) end
+  end
+  print(""); print("Recent:"); for _, l in ipairs(recent) do print(l) end
 end
 
 local function maybeRequest(status)
   if not status.shouldRequest then return end
-  local now = os.clock()
-  local interval = status.interval or cfg.emptyInterval or Lib.DEFAULTS.emptyInterval
-  if now - lastRequest < interval then return end
-  lastRequest = now
-
-  Lib.transmit(cfg.modems, {
-    type = "CONSUMER_REQUEST",
-    requester = cfg.nodeId,
-    requesterName = cfg.name,
-    item = cfg.item,
-    percent = status.percent,
-    state = status.state,
-    requestMode = status.mode,
-    emptyLatched = emptyLatched
-  })
-  log("Requested restock: " .. status.state)
+  local r = rt(status.index); local now = os.clock(); local interval = status.interval or cfg.emptyInterval or Lib.DEFAULTS.emptyInterval
+  if now - r.lastRequest < interval then return end
+  r.lastRequest = now
+  Lib.transmit(cfg.modems, { type = "CONSUMER_REQUEST", requester = cfg.nodeId, requesterName = cfg.name, sourceLabel = status.label, inventory = status.inventory, item = status.item, percent = status.percent, state = status.state, requestMode = status.mode, emptyLatched = status.emptyLatched })
+  log("Requested " .. tostring(status.item) .. " for " .. tostring(status.label) .. ": " .. status.state)
 end
 
-while true do
-  local status = scan()
-  render(status)
-  maybeRequest(status)
+local function sendStatus(statuses)
+  Lib.transmit(cfg.modems, { type = "STATUS", role = "consumer", nodeId = cfg.nodeId, name = cfg.name, watched = statuses, detectedInventories = cfg.detectedInventories, detectedItems = cfg.detectedItems })
+end
 
-  local now = os.clock()
-  if now - lastHeartbeat >= Lib.DEFAULTS.heartbeatInterval then
-    lastHeartbeat = now
-    sendStatus(status)
+local function networkLoop()
+  while true do
+    local _, side, channel, replyChannel, message = os.pullEvent("modem_message")
+    if channel == Lib.CHANNEL and Lib.validPacket(message) then
+      Lib.configNetworkHandler(cfg, cfgPath, cfg.modems, message, lastStatus)
+    end
   end
-
-  sleep(Lib.DEFAULTS.scanInterval)
 end
+
+local function mainLoop()
+  while true do
+    local statuses = scanAll(); lastStatus = { watched = statuses }; render(statuses)
+    for _, s in ipairs(statuses) do maybeRequest(s) end
+    local now = os.clock(); if now - lastHeartbeat >= Lib.DEFAULTS.heartbeatInterval then lastHeartbeat = now; sendStatus(statuses) end
+    sleep(Lib.DEFAULTS.scanInterval)
+  end
+end
+
+parallel.waitForAny(networkLoop, mainLoop)
