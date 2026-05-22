@@ -3,7 +3,7 @@
 
 local Lib = {}
 
-Lib.VERSION = 3
+Lib.VERSION = 4
 Lib.PROTOCOL = "FROGPORT"
 Lib.CHANNEL = 6610
 Lib.ROOT = "/Frogport"
@@ -23,7 +23,9 @@ Lib.DEFAULTS = {
   criticalMin = 10,
   stockNeededInterval = 5,
   lowInterval = 3,
-  criticalInterval = 1
+  criticalInterval = 1,
+  consumerRequestPercent = 50,
+  consumerFixedCapacity = 1280
 }
 
 Lib.SIDES = { "top", "bottom", "left", "right", "front", "back" }

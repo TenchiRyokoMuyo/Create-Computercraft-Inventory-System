@@ -128,10 +128,10 @@ local function editConsumer(c)
     elseif ch == "3" then
       local i = tonumber(Lib.askString("Entry number", "1"))
       local w = i and c.watched[i]
-      if w then w.label = Lib.askString("Label", w.label); w.inventory = Lib.askString("Inventory peripheral", w.inventory); w.item = Lib.askString("Item string", w.item); w.defaultStackSize = Lib.askNumber("Default stack size", w.defaultStackSize or c.defaultStackSize or 64, 1, 64); w.capacityMode = Lib.askCapacityMode(w.capacityMode); w.capacityOverride = Lib.askNumber("Manual full capacity, 0 = auto", w.capacityOverride or 0, 0, 1000000000); w.enabled = Lib.askYesNo("Enabled", w.enabled ~= false) end
+      if w then w.label = Lib.askString("Label", w.label); w.inventory = Lib.askString("Inventory peripheral", w.inventory); w.item = Lib.askString("Item string", w.item); w.defaultStackSize = Lib.askNumber("Default stack size", w.defaultStackSize or c.defaultStackSize or 64, 1, 64); w.capacityMode = "fixed_1280"; w.capacityOverride = Lib.DEFAULTS.consumerFixedCapacity or 1280; w.enabled = Lib.askYesNo("Enabled", w.enabled ~= false) end
     elseif ch == "4" then
       local inv = Lib.askString("Inventory peripheral name", "")
-      if inv ~= "" then table.insert(c.watched, { label = Lib.askString("Label", inv), inventory = inv, item = Lib.askString("Item string", "minecraft:coal"), defaultStackSize = c.defaultStackSize or 64, capacityMode = Lib.askCapacityMode("slot_limits"), capacityOverride = Lib.askNumber("Manual full capacity, 0 = auto", 0, 0, 1000000000), enabled = true }) end
+      if inv ~= "" then table.insert(c.watched, { label = Lib.askString("Label", inv), inventory = inv, item = Lib.askString("Item string", "minecraft:coal"), defaultStackSize = c.defaultStackSize or 64, capacityMode = "fixed_1280", capacityOverride = Lib.DEFAULTS.consumerFixedCapacity or 1280, enabled = true }) end
     elseif ch == "5" then
       local i = tonumber(Lib.askString("Remove entry number", "")); if i and c.watched[i] then table.remove(c.watched, i) end
     elseif ch == "6" then return true

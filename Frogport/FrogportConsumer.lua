@@ -1,10 +1,12 @@
 -- FrogportConsumer.lua
--- Watches multiple inventories independently. Each entry auto-detects/uses one item and requests matching Vault Keepers.
+-- Watches multiple inventories independently. Each entry auto-detects/uses one item and sends one restock request when it reaches the configured threshold.
 
 local Lib = dofile("/Frogport/FrogportLib.lua")
 Lib.ensureDirs()
 local cfgPath = Lib.DATA .. "/consumer.cfg"
 local cfg = Lib.loadTable(cfgPath, nil)
+
+local CONSUMER_FIXED_CAPACITY = Lib.DEFAULTS.consumerFixedCapacity or 1280
 
 local function addWatchedFromInventory(c, invName)
   local item = Lib.firstDetectedItem(invName)
@@ -20,8 +22,8 @@ local function addWatchedFromInventory(c, invName)
       inventory = invName,
       item = item,
       defaultStackSize = stackSize,
-      capacityOverride = capOverride,
-      capacityMode = capMode,
+      capacityOverride = CONSUMER_FIXED_CAPACITY,
+      capacityMode = "fixed_1280",
       enabled = true
     })
   end
@@ -42,8 +44,7 @@ local function setup()
     local inv = Lib.askString("Inventory peripheral name", found.inventories[1] or "")
     if inv and inv ~= "" then
       local item = Lib.askString("Item string", "minecraft:coal")
-      local capOverride, capMode = Lib.askCapacitySettings(inv, item, c.defaultStackSize, 0, "slot_limits")
-      table.insert(c.watched, { label = Lib.askString("Label", inv), inventory = inv, item = item, defaultStackSize = c.defaultStackSize, capacityOverride = capOverride, capacityMode = capMode, enabled = true })
+      table.insert(c.watched, { label = Lib.askString("Label", inv), inventory = inv, item = item, defaultStackSize = c.defaultStackSize, capacityOverride = CONSUMER_FIXED_CAPACITY, capacityMode = "fixed_1280", enabled = true })
     end
   end
   Lib.rescanCommon(c); Lib.saveTable(cfgPath, c); return c
@@ -58,17 +59,24 @@ local recent = {}
 local runtime = {}
 
 local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 9 do table.remove(recent) end end
-local function rt(i) runtime[i] = runtime[i] or { emptyLatched = false, lastRequest = 0 }; return runtime[i] end
+local function rt(i) runtime[i] = runtime[i] or { emptyLatched = false, lastRequest = 0, requestLatched = false }; return runtime[i] end
 
 local function scanEntry(entry, index)
   local r = rt(index)
-  local inv = Lib.countItem(entry.inventory, entry.item, entry.defaultStackSize or cfg.defaultStackSize, entry.capacityOverride, entry.capacityMode)
+  -- Consumer readings always use a fixed effective capacity of 1280, regardless of the exposed inventory size.
+  entry.capacityOverride = CONSUMER_FIXED_CAPACITY
+  entry.capacityMode = "fixed_1280"
+  local inv = Lib.countItem(entry.inventory, entry.item, entry.defaultStackSize or cfg.defaultStackSize, CONSUMER_FIXED_CAPACITY, "slot_limits")
   if inv.percent < (tonumber(cfg.criticalMin) or Lib.DEFAULTS.criticalMin) then r.emptyLatched = true end
   if inv.percent >= (tonumber(cfg.stockNeededMin) or Lib.DEFAULTS.stockNeededMin) then r.emptyLatched = false end
   local state = Lib.inventoryState(inv.percent, cfg, r.emptyLatched)
   inv.state, inv.stateKey, inv.interval, inv.mode, inv.shouldRequest = state.label, state.key, state.interval, state.mode, state.shouldRequest
   inv.emptyLatched = r.emptyLatched
-  inv.index = index; inv.label = entry.label; inv.inventory = entry.inventory; inv.item = entry.item; inv.enabled = entry.enabled ~= false; inv.capacityOverride = entry.capacityOverride; inv.capacityMode = entry.capacityMode
+  inv.requestThreshold = tonumber(entry.requestPercent or cfg.consumerRequestPercent) or Lib.DEFAULTS.consumerRequestPercent
+  inv.requestLatched = r.requestLatched
+  inv.index = index; inv.label = entry.label; inv.inventory = entry.inventory; inv.item = entry.item; inv.enabled = entry.enabled ~= false; inv.capacityOverride = CONSUMER_FIXED_CAPACITY; inv.capacityMode = "fixed_1280"
+  -- Consumers are one-shot requesters now: they request exactly one package when the watched inventory reaches the threshold.
+  inv.shouldRequest = false
   if not inv.enabled then inv.shouldRequest = false end
   return inv
 end
@@ -85,18 +93,44 @@ local function render(statuses)
   print("Watched inventories: " .. tostring(#(cfg.watched or {}))); print("")
   for _, s in ipairs(statuses or {}) do
     print(string.format("[%s] %s", s.state, s.label or s.inventory))
-    print(string.format("  %s %.1f%% %s/%s", tostring(s.item), s.percent, tostring(s.count), tostring(s.capacity))); if tonumber(s.capacityOverride or 0) > 0 then print("  Capacity: manual") else print("  Capacity: auto " .. tostring(s.capacityMode or "slot_limits")) end
+    print(string.format("  %s %.1f%% %s/%s", tostring(s.item), s.percent, tostring(s.count), tostring(s.capacity)))
+    print(string.format("  Request at: %.1f%%  Armed: %s", tonumber(s.requestThreshold or 50), tostring(not s.requestLatched)))
+    print("  Capacity: fixed 1280")
   end
   print(""); print("Recent:"); for _, l in ipairs(recent) do print(l) end
 end
 
 local function maybeRequest(status)
-  if not status.shouldRequest then return end
-  local r = rt(status.index); local now = os.clock(); local interval = status.interval or cfg.emptyInterval or Lib.DEFAULTS.emptyInterval
-  if now - r.lastRequest < interval then return end
-  r.lastRequest = now
-  Lib.transmit(cfg.modems, { type = "CONSUMER_REQUEST", requester = cfg.nodeId, requesterName = cfg.name, sourceLabel = status.label, inventory = status.inventory, item = status.item, percent = status.percent, state = status.state, requestMode = status.mode, emptyLatched = status.emptyLatched })
-  log("Requested " .. tostring(status.item) .. " for " .. tostring(status.label) .. ": " .. status.state)
+  if not status.enabled then return end
+  local r = rt(status.index)
+  local threshold = tonumber(status.requestThreshold or cfg.consumerRequestPercent) or Lib.DEFAULTS.consumerRequestPercent
+
+  -- Rearm only after the inventory climbs back above the request threshold.
+  if status.percent > threshold then
+    r.requestLatched = false
+    status.requestLatched = false
+    return
+  end
+
+  -- At or below the threshold, send exactly one request. No repeated pulse train.
+  if r.requestLatched then return end
+  r.requestLatched = true
+  r.lastRequest = os.clock()
+
+  Lib.transmit(cfg.modems, {
+    type = "CONSUMER_REQUEST",
+    requester = cfg.nodeId,
+    requesterName = cfg.name,
+    sourceLabel = status.label,
+    inventory = status.inventory,
+    item = status.item,
+    percent = status.percent,
+    state = status.state,
+    requestMode = "one_package",
+    requestThreshold = threshold,
+    emptyLatched = status.emptyLatched
+  })
+  log("Requested 1 package: " .. tostring(status.item) .. " for " .. tostring(status.label))
 end
 
 local function sendStatus(statuses)
