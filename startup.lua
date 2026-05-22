@@ -1,19 +1,49 @@
 -- Frogport Central Command startup.lua
--- Place this file at /startup.lua and the Frogport folder at /Frogport
+-- Place this file at /startup.lua. On boot it will install any missing Frogport files
+-- from the GitHub repository, then launch the configured role.
+
+local args = { ... }
 
 local ROOT = "/Frogport"
-local LIB = ROOT .. "/FrogportLib.lua"
 local DATA = ROOT .. "/data"
 local ROLE_FILE = DATA .. "/role.cfg"
 
-if not fs.exists(ROOT) then fs.makeDir(ROOT) end
-if not fs.exists(DATA) then fs.makeDir(DATA) end
+local REPO_RAW = "https://raw.githubusercontent.com/TenchiRyokoMuyo/Create-Computercraft-Inventory-System/main"
+
+local REQUIRED_FILES = {
+  { path = "/Frogport/FrogportLib.lua",          url = REPO_RAW .. "/Frogport/FrogportLib.lua" },
+  { path = "/Frogport/FrogportVaultKeeper.lua",  url = REPO_RAW .. "/Frogport/FrogportVaultKeeper.lua" },
+  { path = "/Frogport/FrogportProducer.lua",     url = REPO_RAW .. "/Frogport/FrogportProducer.lua" },
+  { path = "/Frogport/FrogportConsumer.lua",     url = REPO_RAW .. "/Frogport/FrogportConsumer.lua" },
+  { path = "/Frogport/FrogportOverseer.lua",     url = REPO_RAW .. "/Frogport/FrogportOverseer.lua" },
+  { path = "/README.txt",                        url = REPO_RAW .. "/README.txt" },
+}
 
 local function clear()
   term.setBackgroundColor(colors.black)
   term.setTextColor(colors.white)
   term.clear()
-  term.setCursorPos(1,1)
+  term.setCursorPos(1, 1)
+end
+
+local function pause(msg)
+  print(msg or "Press Enter to continue...")
+  read()
+end
+
+local function dirname(path)
+  return fs.getDir(path)
+end
+
+local function ensureDir(path)
+  if path and path ~= "" and not fs.exists(path) then
+    fs.makeDir(path)
+  end
+end
+
+local function ensureBaseDirs()
+  ensureDir(ROOT)
+  ensureDir(DATA)
 end
 
 local function readFile(path)
@@ -25,21 +55,96 @@ local function readFile(path)
 end
 
 local function writeFile(path, data)
+  ensureDir(dirname(path))
   local h = fs.open(path, "w")
   h.write(data)
   h.close()
 end
 
-if not fs.exists(LIB) then
+local function httpAvailable()
+  return type(http) == "table" and type(http.get) == "function"
+end
+
+local function downloadFile(url, path)
+  if not httpAvailable() then
+    return false, "HTTP API is not enabled. Enable http in ComputerCraft config or upload files manually."
+  end
+
+  local handle, err = http.get(url)
+  if not handle then
+    return false, tostring(err or "http.get failed")
+  end
+
+  local body = handle.readAll()
+  handle.close()
+
+  if not body or body == "" then
+    return false, "downloaded file was empty"
+  end
+
+  writeFile(path, body)
+  return true
+end
+
+local function installMissingFiles(force)
+  ensureBaseDirs()
+
+  local missing = {}
+  for _, file in ipairs(REQUIRED_FILES) do
+    if force or not fs.exists(file.path) then
+      table.insert(missing, file)
+    end
+  end
+
+  if #missing == 0 then
+    return true
+  end
+
   clear()
-  print("FrogportLib.lua missing.")
-  print("Expected: " .. LIB)
+  print("Frogport Central Command")
+  print("Installing missing files")
+  print("------------------------")
+  print("")
+
+  for _, file in ipairs(missing) do
+    print("Downloading: " .. file.path)
+    local ok, err = downloadFile(file.url, file.path)
+    if not ok then
+      print("")
+      print("Failed to install:")
+      print(file.path)
+      print("")
+      print("Reason:")
+      print(tostring(err))
+      print("")
+      print("Repository URL:")
+      print("github.com/TenchiRyokoMuyo/Create-Computercraft-Inventory-System")
+      return false
+    end
+  end
+
+  print("")
+  print("Install complete.")
+  sleep(1)
+  return true
+end
+
+local forceUpdate = false
+for _, arg in ipairs(args) do
+  if tostring(arg):lower() == "update" or tostring(arg):lower() == "--update" then
+    forceUpdate = true
+  end
+end
+
+if not installMissingFiles(forceUpdate) then
+  pause()
   return
 end
 
 clear()
 print("Frogport Central Command")
 print("-------------------------")
+print("")
 
 local role = readFile(ROLE_FILE)
 if role then
@@ -83,7 +188,10 @@ if not program or not fs.exists(program) then
   print("Configured role: " .. tostring(role))
   print("Program missing: " .. tostring(program))
   print("")
-  print("Delete " .. ROLE_FILE .. " to rerun setup.")
+  print("Run this to force reinstall:")
+  print("startup update")
+  print("")
+  print("Or delete " .. ROLE_FILE .. " to rerun setup.")
   return
 end
 
