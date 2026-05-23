@@ -53,12 +53,14 @@ end
 if not cfg then cfg = setup() else Lib.defaultThresholds(cfg); cfg.watched = cfg.watched or {}; Lib.rescanCommon(cfg); Lib.saveTable(cfgPath, cfg) end
 Lib.openModems(cfg.modems, Lib.CHANNEL)
 
-local lastHeartbeat = 0
-local lastStatus = nil
-local recent = {}
-local runtime = {}
+local persisted = Lib.loadRuntime("consumer", {})
+local lastHeartbeat = tonumber(persisted.lastHeartbeat) or 0
+local lastStatus = (Lib.loadStatusCache("consumer", {}).status) or persisted.lastStatus
+local recent = persisted.recent or {}
+local runtime = persisted.runtime or {}
 
-local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 9 do table.remove(recent) end end
+local function savePersist() Lib.saveRuntime("consumer", { runtime = runtime, recent = recent, lastHeartbeat = lastHeartbeat, lastStatus = lastStatus }); Lib.saveStatusCache("consumer", cfg, lastStatus) end
+local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 9 do table.remove(recent) end; savePersist() end
 local function rt(i) runtime[i] = runtime[i] or { emptyLatched = false, lastRequest = 0, requestLatched = false }; return runtime[i] end
 
 local function scanEntry(entry, index)
@@ -109,6 +111,7 @@ local function maybeRequest(status)
   if status.percent > threshold then
     r.requestLatched = false
     status.requestLatched = false
+    savePersist()
     return
   end
 
@@ -131,6 +134,7 @@ local function maybeRequest(status)
     emptyLatched = status.emptyLatched
   })
   log("Requested 1 package: " .. tostring(status.item) .. " for " .. tostring(status.label))
+  savePersist()
 end
 
 local function sendStatus(statuses)
@@ -148,7 +152,7 @@ end
 
 local function mainLoop()
   while true do
-    local statuses = scanAll(); lastStatus = { watched = statuses }; render(statuses)
+    local statuses = scanAll(); lastStatus = { watched = statuses }; savePersist(); render(statuses)
     for _, s in ipairs(statuses) do maybeRequest(s) end
     local now = os.clock(); if now - lastHeartbeat >= Lib.DEFAULTS.heartbeatInterval then lastHeartbeat = now; sendStatus(statuses) end
     sleep(Lib.DEFAULTS.scanInterval)

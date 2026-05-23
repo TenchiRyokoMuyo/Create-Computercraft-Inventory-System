@@ -3,7 +3,7 @@
 
 local Lib = {}
 
-Lib.VERSION = 4
+Lib.VERSION = 7
 Lib.PROTOCOL = "FROGPORT"
 Lib.CHANNEL = 6610
 Lib.ROOT = "/Frogport"
@@ -92,6 +92,112 @@ function Lib.askYesNo(label, default)
     local v = tostring(Lib.askString(label .. " (y/n)", d)):lower()
     if v == "y" or v == "yes" then return true end
     if v == "n" or v == "no" then return false end
+  end
+end
+
+
+function Lib.safeFileName(s)
+  s = tostring(s or "unknown")
+  s = s:gsub("[^%w_%-%.]", "_")
+  if s == "" then s = "unknown" end
+  return s
+end
+
+function Lib.runtimePath(role, suffix)
+  Lib.ensureDirs()
+  return Lib.DATA .. "/" .. Lib.safeFileName(role or "node") .. "_" .. Lib.safeFileName(suffix or "runtime") .. ".dat"
+end
+
+function Lib.loadRuntime(role, fallback)
+  return Lib.loadTable(Lib.runtimePath(role, "runtime"), fallback or {})
+end
+
+function Lib.saveRuntime(role, tbl)
+  tbl = tbl or {}
+  tbl.savedAt = os.epoch("utc")
+  Lib.saveTable(Lib.runtimePath(role, "runtime"), tbl)
+end
+
+function Lib.loadStatusCache(role, fallback)
+  return Lib.loadTable(Lib.runtimePath(role, "status"), fallback or {})
+end
+
+function Lib.saveStatusCache(role, cfg, status)
+  local cache = {
+    savedAt = os.epoch("utc"),
+    role = role,
+    nodeId = cfg and cfg.nodeId,
+    name = cfg and cfg.name,
+    status = status,
+  }
+  Lib.saveTable(Lib.runtimePath(role, "status"), cache)
+end
+
+function Lib.truncate(text, width)
+  text = tostring(text or "")
+  width = tonumber(width) or 1
+  if #text <= width then return text end
+  if width <= 3 then return text:sub(1, width) end
+  return text:sub(1, width - 3) .. "..."
+end
+
+function Lib.scrollMenu(title, items, opts)
+  if type(opts) ~= "table" then opts = { subtitle = opts } end
+  opts = opts or {}
+  items = items or {}
+  local selected = Lib.clamp(tonumber(opts.selected) or 1, 1, math.max(#items, 1))
+  local top = 1
+  while true do
+    Lib.clear()
+    local w, h = term.getSize()
+    term.setTextColor(colors.lime)
+    print(title or "Menu")
+    term.setTextColor(colors.white)
+    if opts.subtitle and opts.subtitle ~= "" then print(Lib.truncate(opts.subtitle, w)) end
+    print(string.rep("-", math.min(w, 32)))
+    if #items == 0 then
+      print("No entries.")
+      print("")
+      print("Q/Esc/backspace to return")
+    else
+      local listHeight = h - 5
+      if opts.subtitle and opts.subtitle ~= "" then listHeight = h - 6 end
+      if opts.footer then listHeight = listHeight - 1 end
+      if listHeight < 3 then listHeight = 3 end
+      if selected < top then top = selected end
+      if selected > top + listHeight - 1 then top = selected - listHeight + 1 end
+      for row = 0, listHeight - 1 do
+        local i = top + row
+        local item = items[i]
+        if item then
+          local label = item.label or tostring(item.value or i)
+          if item.sub and item.sub ~= "" then label = label .. " - " .. item.sub end
+          label = Lib.truncate(label, w)
+          if i == selected then
+            term.setTextColor(colors.black)
+            term.setBackgroundColor(colors.white)
+          else
+            term.setTextColor(item.color or colors.white)
+            term.setBackgroundColor(colors.black)
+          end
+          term.write(label .. string.rep(" ", math.max(0, w - #label)))
+          term.setBackgroundColor(colors.black)
+          term.setTextColor(colors.white)
+          print("")
+        end
+      end
+      term.setTextColor(colors.gray)
+      print(opts.footer or "Up/Down Enter | Q/Esc back")
+    end
+    local _, key = os.pullEvent("key")
+    if key == keys.up then selected = math.max(1, selected - 1)
+    elseif key == keys.down then selected = math.min(#items, selected + 1)
+    elseif key == keys.pageUp then selected = math.max(1, selected - 8)
+    elseif key == keys.pageDown then selected = math.min(#items, selected + 8)
+    elseif key == keys.home then selected = 1
+    elseif key == keys["end"] then selected = #items
+    elseif key == keys.enter or key == keys.numPadEnter then if items[selected] then return items[selected].value, selected, items[selected] end
+    elseif key == keys.q or key == keys.escape or key == keys.backspace then return nil end
   end
 end
 

@@ -19,8 +19,10 @@ end
 if not cfg then cfg = setup() else Lib.defaultThresholds(cfg); Lib.rescanCommon(cfg); Lib.saveTable(cfgPath, cfg) end
 Lib.openModems(cfg.modems, Lib.CHANNEL)
 
-local nodes, recent, selectedConfig = {}, {}, nil
-local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 12 do table.remove(recent) end end
+local persisted = Lib.loadRuntime("overseer", {})
+local nodes, recent, selectedConfig = persisted.nodes or {}, persisted.recent or {}, nil
+local function savePersist() Lib.saveRuntime("overseer", { nodes = nodes, recent = recent }) end
+local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 12 do table.remove(recent) end; savePersist() end
 
 local function age(packet) if not packet or not packet.time then return 999 end return math.floor((os.epoch("utc") - packet.time) / 1000) end
 local function sortedNodes()
@@ -86,7 +88,7 @@ local function requestConfig(node)
       local channel, msg = ev[3], ev[5]
       if channel == Lib.CHANNEL and Lib.validPacket(msg) then
         if msg.type == "CONFIG_RESPONSE" and msg.nodeId == node.nodeId then selectedConfig = msg; return msg end
-        if msg.type == "STATUS" then nodes[msg.nodeId or msg.name] = msg end
+        if msg.type == "STATUS" then nodes[msg.nodeId or msg.name] = msg; savePersist() end
       end
     elseif ev[1] == "key" and ev[2] == keys.q then return nil end
   end
@@ -112,85 +114,119 @@ end
 local function editConsumer(c)
   c.watched = c.watched or {}
   while true do
-    Lib.header("Edit Consumer: " .. tostring(c.name))
-    print("1. Rename node")
-    print("2. Edit thresholds/intervals")
-    print("3. Edit watched inventory")
-    print("4. Add watched inventory")
-    print("5. Remove watched inventory")
-    print("6. Save")
-    print("7. Cancel")
-    print("")
-    for i, w in ipairs(c.watched) do print(i .. ". " .. tostring(w.label) .. " | " .. tostring(w.inventory) .. " | " .. tostring(w.item) .. " | enabled=" .. tostring(w.enabled ~= false)) end
-    local ch = Lib.askString(">", "6")
-    if ch == "1" then c.name = Lib.askString("Node name", c.name)
-    elseif ch == "2" then editThresholds(c)
-    elseif ch == "3" then
-      local i = tonumber(Lib.askString("Entry number", "1"))
+    local items = {
+      { label = "Rename node", value = "rename", sub = tostring(c.name) },
+      { label = "Edit thresholds/intervals", value = "thresholds" },
+      { label = "Edit watched inventory", value = "edit_watched", sub = tostring(#c.watched) .. " configured" },
+      { label = "Add watched inventory", value = "add_watched" },
+      { label = "Remove watched inventory", value = "remove_watched" },
+      { label = "Save", value = "save" },
+      { label = "Cancel", value = "cancel" },
+    }
+    local ch = Lib.scrollMenu("Edit Consumer", items, tostring(c.name))
+    if ch == "rename" then c.name = Lib.askString("Node name", c.name)
+    elseif ch == "thresholds" then editThresholds(c)
+    elseif ch == "edit_watched" then
+      local wItems = {}
+      for i, w in ipairs(c.watched) do table.insert(wItems, { label = tostring(w.label or w.inventory), sub = tostring(w.inventory) .. " | " .. tostring(w.item), value = i }) end
+      local i = Lib.scrollMenu("Choose watched inventory", wItems, tostring(c.name))
       local w = i and c.watched[i]
-      if w then w.label = Lib.askString("Label", w.label); w.inventory = Lib.askString("Inventory peripheral", w.inventory); w.item = Lib.askString("Item string", w.item); w.defaultStackSize = Lib.askNumber("Default stack size", w.defaultStackSize or c.defaultStackSize or 64, 1, 64); w.capacityMode = "fixed_1280"; w.capacityOverride = Lib.DEFAULTS.consumerFixedCapacity or 1280; w.enabled = Lib.askYesNo("Enabled", w.enabled ~= false) end
-    elseif ch == "4" then
+      if w then
+        w.label = Lib.askString("Label", w.label)
+        w.inventory = Lib.askString("Inventory peripheral", w.inventory)
+        w.item = Lib.askString("Item string", w.item)
+        w.defaultStackSize = Lib.askNumber("Default stack size", w.defaultStackSize or c.defaultStackSize or 64, 1, 64)
+        w.capacityMode = "fixed_1280"
+        w.capacityOverride = Lib.DEFAULTS.consumerFixedCapacity or 1280
+        w.enabled = Lib.askYesNo("Enabled", w.enabled ~= false)
+      end
+    elseif ch == "add_watched" then
       local inv = Lib.askString("Inventory peripheral name", "")
       if inv ~= "" then table.insert(c.watched, { label = Lib.askString("Label", inv), inventory = inv, item = Lib.askString("Item string", "minecraft:coal"), defaultStackSize = c.defaultStackSize or 64, capacityMode = "fixed_1280", capacityOverride = Lib.DEFAULTS.consumerFixedCapacity or 1280, enabled = true }) end
-    elseif ch == "5" then
-      local i = tonumber(Lib.askString("Remove entry number", "")); if i and c.watched[i] then table.remove(c.watched, i) end
-    elseif ch == "6" then return true
-    elseif ch == "7" then return false end
+    elseif ch == "remove_watched" then
+      local wItems = {}
+      for i, w in ipairs(c.watched) do table.insert(wItems, { label = tostring(w.label or w.inventory), sub = tostring(w.inventory) .. " | " .. tostring(w.item), value = i }) end
+      local i = Lib.scrollMenu("Remove watched inventory", wItems, tostring(c.name))
+      if i and c.watched[i] then table.remove(c.watched, i) end
+    elseif ch == "save" then return true
+    elseif ch == nil or ch == "cancel" then return false end
   end
 end
 
 local function editSimple(c)
   while true do
-    Lib.header("Edit " .. tostring(c.role) .. ": " .. tostring(c.name))
-    print("1. Rename node")
-    print("2. Item string")
-    print("3. Inventory peripheral")
-    print("4. Packager side")
-    print("5. Capacity mode / override")
-    print("6. Thresholds/intervals")
-    print("7. Pulse/cooldown")
-    if c.role == "producer" then print("8. Enabled") end
-    print("S. Save")
-    print("C. Cancel")
-    local ch = tostring(Lib.askString(">", "S")):lower()
-    if ch == "1" then c.name = Lib.askString("Node name", c.name)
-    elseif ch == "2" then c.item = Lib.askString("Item string", c.item)
-    elseif ch == "3" then c.inventory = Lib.askString("Inventory peripheral", c.inventory or "")
-    elseif ch == "4" then c.packagerSide = Lib.askString("Packager redstone side", c.packagerSide or "right")
-    elseif ch == "5" then c.capacityMode = Lib.askCapacityMode(c.capacityMode); c.capacityOverride = Lib.askNumber("Manual full capacity, 0 = auto", c.capacityOverride or 0, 0, 1000000000)
-    elseif ch == "6" then editThresholds(c)
-    elseif ch == "7" then c.pulseLength = Lib.askNumber("Pulse length", c.pulseLength or 0.25, 0.05, 10); c.producerCooldown = Lib.askNumber("Producer cooldown", c.producerCooldown or 2, 0.05, 120); c.vaultPulseCooldown = Lib.askNumber("Vault pulse cooldown", c.vaultPulseCooldown or 0.5, 0.05, 120)
-    elseif ch == "8" and c.role == "producer" then c.enabled = Lib.askYesNo("Enabled", c.enabled ~= false)
-    elseif ch == "s" then return true
-    elseif ch == "c" then return false end
+    local items = {
+      { label = "Rename node", value = "rename", sub = tostring(c.name) },
+      { label = "Item string", value = "item", sub = tostring(c.item) },
+      { label = "Inventory peripheral", value = "inventory", sub = tostring(c.inventory or "none") },
+      { label = "Packager side", value = "packager", sub = tostring(c.packagerSide or "none") },
+      { label = "Capacity mode / override", value = "capacity", sub = tostring(c.capacityMode or "slot_limits") .. " / " .. tostring(c.capacityOverride or 0) },
+      { label = "Thresholds/intervals", value = "thresholds" },
+      { label = "Pulse/cooldown", value = "pulse" },
+      { label = "Enabled", value = "enabled", sub = tostring(c.enabled ~= false) },
+      { label = "Save", value = "save" },
+      { label = "Cancel", value = "cancel" },
+    }
+    if c.role ~= "producer" then table.remove(items, 8) end
+    local ch = Lib.scrollMenu("Edit " .. tostring(c.role), items, tostring(c.name))
+    if ch == "rename" then c.name = Lib.askString("Node name", c.name)
+    elseif ch == "item" then c.item = Lib.askString("Item string", c.item)
+    elseif ch == "inventory" then c.inventory = Lib.askString("Inventory peripheral", c.inventory or "")
+    elseif ch == "packager" then c.packagerSide = Lib.askString("Packager redstone side", c.packagerSide or "right")
+    elseif ch == "capacity" then c.capacityMode = Lib.askCapacityMode(c.capacityMode); c.capacityOverride = Lib.askNumber("Manual full capacity, 0 = auto", c.capacityOverride or 0, 0, 1000000000)
+    elseif ch == "thresholds" then editThresholds(c)
+    elseif ch == "pulse" then c.pulseLength = Lib.askNumber("Pulse length", c.pulseLength or 0.25, 0.05, 10); c.producerCooldown = Lib.askNumber("Producer cooldown", c.producerCooldown or 2, 0.05, 120); c.vaultPulseCooldown = Lib.askNumber("Vault pulse cooldown", c.vaultPulseCooldown or 0.5, 0.05, 120)
+    elseif ch == "enabled" and c.role == "producer" then c.enabled = Lib.askYesNo("Enabled", c.enabled ~= false)
+    elseif ch == "save" then return true
+    elseif ch == nil or ch == "cancel" then return false end
   end
 end
 
 local function chooseNode()
   local rows = sortedNodes()
-  Lib.header("Choose network node")
-  for i, n in ipairs(rows) do print(i .. ". " .. tostring(n.name) .. " [" .. tostring(n.role) .. "] " .. tostring(n.nodeId)) end
-  local n = tonumber(Lib.askString("Node number", ""))
-  return n and rows[n] or nil
+  local items = {}
+  for i, n in ipairs(rows) do
+    table.insert(items, {
+      label = tostring(n.name or n.nodeId),
+      sub = "[" .. tostring(n.role or "?") .. "] " .. tostring(n.item or "") .. " " .. tostring(age(n)) .. "s",
+      value = n
+    })
+  end
+  return Lib.scrollMenu("Choose network node", items, "Listed by the user-named PC/node")
 end
 
 local function menu()
   while true do
-    Lib.header("Overseer menu")
-    print("1. Return to dashboard")
-    print("2. Edit remote node configuration")
-    print("3. Request remote rescan")
-    print("4. Broadcast config refresh")
-    print("5. Local rescan")
-    print("6. Reboot overseer")
-    local ch = Lib.askString(">", "1")
-    if ch == "1" then return
-    elseif ch == "2" then
-      local node = chooseNode(); if node then local resp = requestConfig(node); if resp and resp.config then local c = resp.config; local save = (c.role == "consumer") and editConsumer(c) or editSimple(c); if save then sendConfig(node, c) end else Lib.pause("No config response. Press Enter.") end end
-    elseif ch == "3" then local node = chooseNode(); if node then Lib.transmit(cfg.modems, { type = "RESCAN", target = node.nodeId, requester = cfg.nodeId }); log("Asked " .. tostring(node.name) .. " to rescan") end
-    elseif ch == "4" then Lib.transmit(cfg.modems, { type = "CONFIG_GET", requester = cfg.nodeId, requesterName = cfg.name }); log("Broadcast config refresh")
-    elseif ch == "5" then Lib.rescanCommon(cfg); Lib.saveTable(cfgPath, cfg); Lib.openModems(cfg.modems, Lib.CHANNEL); log("Local rescan complete")
-    elseif ch == "6" then os.reboot() end
+    local ch = Lib.scrollMenu("Overseer menu", {
+      { label = "Return to dashboard", value = "return" },
+      { label = "Edit remote node configuration", value = "edit" },
+      { label = "Request remote rescan", value = "rescan" },
+      { label = "Broadcast config refresh", value = "refresh" },
+      { label = "Local rescan", value = "local" },
+      { label = "Reboot overseer", value = "reboot" },
+    }, "Scrollable menu")
+    if ch == nil or ch == "return" then return
+    elseif ch == "edit" then
+      local node = chooseNode()
+      if node then
+        local resp = requestConfig(node)
+        if resp and resp.config then
+          local c = resp.config
+          local save = (c.role == "consumer") and editConsumer(c) or editSimple(c)
+          if save then sendConfig(node, c) end
+        else
+          Lib.pause("No config response. Press Enter.")
+        end
+      end
+    elseif ch == "rescan" then
+      local node = chooseNode()
+      if node then Lib.transmit(cfg.modems, { type = "RESCAN", target = node.nodeId, requester = cfg.nodeId }); log("Asked " .. tostring(node.name) .. " to rescan") end
+    elseif ch == "refresh" then
+      Lib.transmit(cfg.modems, { type = "CONFIG_GET", requester = cfg.nodeId, requesterName = cfg.name })
+      log("Broadcast config refresh")
+    elseif ch == "local" then
+      Lib.rescanCommon(cfg); Lib.saveTable(cfgPath, cfg); Lib.openModems(cfg.modems, Lib.CHANNEL); log("Local rescan complete")
+    elseif ch == "reboot" then os.reboot() end
   end
 end
 
@@ -200,11 +236,11 @@ local function eventLoop()
     if ev[1] == "modem_message" then
       local channel, msg = ev[3], ev[5]
       if channel == Lib.CHANNEL and Lib.validPacket(msg) then
-        if msg.type == "STATUS" then nodes[msg.nodeId or msg.name] = msg
+        if msg.type == "STATUS" then nodes[msg.nodeId or msg.name] = msg; savePersist()
         elseif msg.type == "PRODUCER_PULSED" then log("Producer pulsed: " .. tostring(msg.name) .. " " .. tostring(msg.item))
         elseif msg.type == "VAULT_PULSED" then log("Vault pulsed: " .. tostring(msg.name) .. " " .. tostring(msg.item))
         elseif msg.type == "CONFIG_ACK" then log("Config ACK: " .. tostring(msg.name) .. " " .. tostring(msg.note or msg.error or msg.ok))
-        elseif msg.type == "CONFIG_RESPONSE" then nodes[msg.nodeId or msg.name] = msg.status or nodes[msg.nodeId or msg.name] or msg; log("Config from " .. tostring(msg.name)) end
+        elseif msg.type == "CONFIG_RESPONSE" then nodes[msg.nodeId or msg.name] = msg.status or nodes[msg.nodeId or msg.name] or msg; savePersist(); log("Config from " .. tostring(msg.name)) end
       end
     elseif ev[1] == "key" and (ev[2] == keys.m or ev[2] == keys.enter) then menu() end
   end

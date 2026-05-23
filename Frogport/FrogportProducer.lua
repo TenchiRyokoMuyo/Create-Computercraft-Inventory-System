@@ -26,10 +26,12 @@ end
 if not cfg then cfg = setup() else Lib.defaultThresholds(cfg); Lib.rescanCommon(cfg); Lib.saveTable(cfgPath, cfg) end
 Lib.openModems(cfg.modems, Lib.CHANNEL)
 
-local lastPulse, lastHeartbeat = 0, 0
-local lastStatus = nil
-local recent = {}
-local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 7 do table.remove(recent) end end
+local persisted = Lib.loadRuntime("producer", {})
+local lastPulse, lastHeartbeat = tonumber(persisted.lastPulse) or 0, tonumber(persisted.lastHeartbeat) or 0
+local lastStatus = (Lib.loadStatusCache("producer", {}).status) or persisted.lastStatus
+local recent = persisted.recent or {}
+local function savePersist() Lib.saveRuntime("producer", { lastPulse = lastPulse, lastHeartbeat = lastHeartbeat, lastStatus = lastStatus, recent = recent }); Lib.saveStatusCache("producer", cfg, lastStatus) end
+local function log(line) table.insert(recent, 1, os.date("%H:%M:%S") .. " " .. line); while #recent > 7 do table.remove(recent) end; savePersist() end
 
 local function scan()
   if not cfg.inventory then return { count = 0, capacity = 0, percent = 0, state = "No Inventory", stateKey = "none", mode = "none", shouldRequest = false } end
@@ -79,8 +81,8 @@ end
 
 local function mainLoop()
   while true do
-    local status = scan(); lastStatus = status; render(status)
-    local now = os.clock(); if now - lastHeartbeat >= Lib.DEFAULTS.heartbeatInterval then lastHeartbeat = now; sendStatus(status) end
+    local status = scan(); lastStatus = status; savePersist(); render(status)
+    local now = os.clock(); if now - lastHeartbeat >= Lib.DEFAULTS.heartbeatInterval then lastHeartbeat = now; savePersist(); sendStatus(status) end
     sleep(Lib.DEFAULTS.scanInterval)
   end
 end
